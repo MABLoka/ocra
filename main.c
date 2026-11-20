@@ -347,9 +347,11 @@ static void paint(struct buffer *b) {
   cairo_fill(cr);
 
   /* outline */
+  double dashes[] = {8.0, 4.0}; /* 8px line, 4px gap */
+  cairo_set_dash(cr, dashes, 2, 0.0);
   cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-  cairo_set_source_rgb(cr, 0.2, 0.6, 1.0);
-  cairo_set_line_width(cr, 2);
+  cairo_set_source_rgb(cr, 0.8, 0.8, 0.8);
+  cairo_set_line_width(cr, 1);
   cairo_rectangle(cr, bx.x, bx.y, bx.w, bx.h);
   cairo_stroke(cr);
 
