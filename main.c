@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include <cairo.h>
+#include <leptonica/allheaders.h>
 #include <linux/input-event-codes.h>
 #include <pango/pangocairo.h>
 #include <spawn.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <tesseract/capi.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -55,6 +57,196 @@ static struct box theBox;
 
 static int running = 1;
 static int capture_pending;
+static int reading_pending;
+
+/* turn two corners into a box with positive width/height */
+static struct box make_box(double x0, double y0, double x1, double y1) {
+  struct box b;
+  b.x = x0 < x1 ? x0 : x1;
+  b.y = y0 < y1 ? y0 : y1;
+  b.w = x0 < x1 ? x1 - x0 : x0 - x1;
+  b.h = y0 < y1 ? y1 - y0 : y0 - y1;
+  return b;
+}
+
+/* ---- OCR ---- */
+#define OCR_PATH "/tmp/overlay-ocr.png"
+
+enum mode { MODE_SHOT, MODE_TEXT };
+static enum mode mode = MODE_SHOT;
+
+struct word {
+  char *text;
+  struct box r;
+  int line;
+  int selected;
+};
+static struct word *words;
+static int nwords;
+
+static int sel_dragging;
+static double sel_x, sel_y;
+static int configured; /* 0 while hidden, until a new configure arrives */
+
+static int inside(struct box b, double x, double y) {
+  return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+}
+static int overlaps(struct box a, struct box b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h &&
+         b.y < a.y + a.h;
+}
+static void free_words(void) {
+  for (int i = 0; i < nwords; i++)
+    free(words[i].text);
+  free(words);
+  words = NULL;
+  nwords = 0;
+}
+
+static void run_ocr(const char *path, struct box region) {
+  free_words();
+  PIX *pix = pixRead(path);
+  if (!pix)
+    return;
+  /* image pixels per logical pixel (2 on a 2x HiDPI screen) */
+  double scale = pixGetWidth(pix) / region.w;
+
+  TessBaseAPI *api = TessBaseAPICreate();
+  if (TessBaseAPIInit3(api, NULL, "eng") == 0) {
+    TessBaseAPISetImage2(api, pix);
+    if (TessBaseAPIRecognize(api, NULL) == 0) {
+      TessResultIterator *ri = TessBaseAPIGetIterator(api);
+      if (ri) {
+        TessPageIterator *pi = TessResultIteratorGetPageIterator(ri);
+        int line = -1, cap = 0;
+        do {
+          if (TessPageIteratorIsAtBeginningOf(pi, RIL_TEXTLINE))
+            line++;
+          char *txt = TessResultIteratorGetUTF8Text(ri, RIL_WORD);
+          int x1, y1, x2, y2;
+          if (txt && *txt &&
+              TessPageIteratorBoundingBox(pi, RIL_WORD, &x1, &y1, &x2, &y2)) {
+            if (nwords == cap) {
+              cap = cap ? cap * 2 : 64;
+              words = realloc(words, cap * sizeof *words);
+            }
+            words[nwords++] = (struct word){
+                .text = strdup(txt),
+                .r = {region.x + x1 / scale, region.y + y1 / scale,
+                      (x2 - x1) / scale, (y2 - y1) / scale},
+                .line = line,
+            };
+          }
+          if (txt)
+            TessDeleteText(txt);
+        } while (TessPageIteratorNext(pi, RIL_WORD));
+        TessResultIteratorDelete(ri);
+      }
+    }
+  } else {
+    fprintf(stderr,
+            "tesseract init failed (is tesseract-data-eng installed?)\n");
+  }
+  TessBaseAPIDelete(api);
+  pixDestroy(&pix);
+}
+
+static void hide_overlay(void) {
+  if (frame_cb) {
+    wl_callback_destroy(frame_cb);
+    frame_cb = NULL;
+  }
+  configured = 0;
+  wl_surface_attach(surface, NULL, 0, 0);
+  wl_surface_commit(surface);
+  wl_display_roundtrip(display);
+}
+
+static void show_overlay(void) {
+  wl_surface_commit(surface); /* compositor replies with configure → redraw */
+}
+
+static void run_grim(struct box b, const char *path) {
+  char geom[64];
+  snprintf(geom, sizeof geom, "%d,%d %dx%d", (int)b.x, (int)b.y, (int)b.w,
+           (int)b.h);
+  char *argv[] = {"grim", "-g", geom, (char *)path, NULL};
+  pid_t pid;
+  if (posix_spawnp(&pid, "grim", NULL, NULL, argv, environ) == 0)
+    waitpid(pid, NULL, 0);
+  else
+    perror("grim");
+}
+
+static void update_selection(void) {
+  struct box s = make_box(sel_x, sel_y, ptr_x, ptr_y);
+  if (s.w < 1)
+    s.w = 1; /* a plain click still selects one word */
+  if (s.h < 1)
+    s.h = 1;
+  for (int i = 0; i < nwords; i++)
+    words[i].selected = overlaps(s, words[i].r);
+}
+
+static void copy_selection(void) {
+  int any = 0;
+  for (int i = 0; i < nwords; i++)
+    any |= words[i].selected;
+  if (!any)
+    return;
+
+  FILE *p = popen("wl-copy", "w");
+  if (!p)
+    return;
+  int first = 1, prev_line = -1;
+  for (int i = 0; i < nwords; i++) {
+    if (!words[i].selected)
+      continue;
+    if (!first)
+      fputc(words[i].line != prev_line ? '\n' : ' ', p);
+    fputs(words[i].text, p);
+    prev_line = words[i].line;
+    first = 0;
+  }
+  pclose(p);
+}
+
+static void draw_words(cairo_t *cr) {
+  for (int i = 0; i < nwords; i++) {
+    struct box r = words[i].r;
+
+    /* backing: blue if selected, dark otherwise */
+    if (words[i].selected)
+      cairo_set_source_rgba(cr, 0.2, 0.6, 1.0, 0.85);
+    else
+      cairo_set_source_rgba(cr, 0, 0, 0, 0.7);
+    cairo_rectangle(cr, r.x, r.y, r.w, r.h);
+    cairo_fill(cr);
+
+    /* text sized to the word's box */
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *font = pango_font_description_from_string("Sans");
+    pango_font_description_set_absolute_size(font, r.h * 0.8 * PANGO_SCALE);
+    pango_layout_set_font_description(layout, font);
+    pango_layout_set_text(layout, words[i].text, -1);
+    int tw, th;
+    pango_layout_get_pixel_size(layout, &tw, &th);
+
+    cairo_save(cr);
+    cairo_translate(cr, r.x, r.y + (r.h - th) / 2.0);
+    if (tw > 0)
+      cairo_scale(cr, r.w / tw, 1.0);      /* stretch to the box width */
+    pango_cairo_update_layout(cr, layout); /* required after transforming */
+    cairo_set_source_rgb(cr, 1, 1, 1);
+    pango_cairo_show_layout(cr, layout);
+    cairo_restore(cr);
+
+    pango_font_description_free(font);
+    g_object_unref(layout);
+  }
+}
+
+/* ---- OCR END ---- */
 
 static void capture_box(struct box b) {
   /* hide: a NULL buffer unmaps the surface */
@@ -85,16 +277,6 @@ static void capture_box(struct box b) {
 
   /* show again: an empty commit triggers a new configure, then a redraw */
   wl_surface_commit(surface);
-}
-
-/* turn two corners into a box with positive width/height */
-static struct box make_box(double x0, double y0, double x1, double y1) {
-  struct box b;
-  b.x = x0 < x1 ? x0 : x1;
-  b.y = y0 < y1 ? y0 : y1;
-  b.w = x0 < x1 ? x1 - x0 : x0 - x1;
-  b.h = y0 < y1 ? y1 - y0 : y0 - y1;
-  return b;
 }
 
 /* ---------- buffers (created once, reused) ---------- */
@@ -197,12 +379,18 @@ static void paint(struct buffer *b) {
 
   cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
   cairo_set_source_rgb(cr, 1, 1, 1);
+
+  if (mode == MODE_TEXT)
+    draw_words(cr);
   if (dragging) {
     char label[32];
     snprintf(label, sizeof label, "%d × %d", (int)bx.w, (int)bx.h);
     draw_label(cr, label, bx.x, bx.y + bx.h + 6);
   } else {
-    draw_label(cr, "Click and drag to draw a box — Esc to finish", 20, 20);
+    if (mode == MODE_TEXT)
+      draw_label(cr, "OCR", 20, 20);
+    else if (mode == MODE_SHOT)
+      draw_label(cr, "Screenshot", 20, 20);
   }
 
   cairo_destroy(cr);
@@ -219,6 +407,8 @@ static void frame_done(void *data, struct wl_callback *cb, uint32_t time) {
 static const struct wl_callback_listener frame_listener = {.done = frame_done};
 
 static void render(void) {
+  if (!configured)
+    return;
   struct buffer *b = NULL;
   for (int i = 0; i < 2; i++)
     if (buffers[i].wl && !buffers[i].busy) {
@@ -251,6 +441,7 @@ static void request_redraw(void) {
 static void layer_configure(void *data, struct zwlr_layer_surface_v1 *ls,
                             uint32_t serial, uint32_t w, uint32_t h) {
   zwlr_layer_surface_v1_ack_configure(ls, serial);
+  configured = 1;
   if ((int)w != width || (int)h != height || !pool_data) {
     destroy_buffers();
     width = w;
@@ -281,28 +472,43 @@ static void ptr_enter(void *d, struct wl_pointer *p, uint32_t serial,
 }
 static void ptr_leave(void *d, struct wl_pointer *p, uint32_t serial,
                       struct wl_surface *s) {}
+
 static void ptr_motion(void *d, struct wl_pointer *p, uint32_t time,
                        wl_fixed_t sx, wl_fixed_t sy) {
   ptr_x = wl_fixed_to_double(sx);
   ptr_y = wl_fixed_to_double(sy);
-  if (dragging)
+  if (sel_dragging)
+    update_selection();
+  if (dragging || sel_dragging)
     request_redraw();
 }
+
 static void ptr_button(void *d, struct wl_pointer *p, uint32_t serial,
                        uint32_t time, uint32_t button, uint32_t state) {
   if (button != BTN_LEFT)
     return;
   if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
-    dragging = 1;
-    drag_x = ptr_x;
-    drag_y = ptr_y;
+    if (mode == MODE_TEXT && inside(theBox, ptr_x, ptr_y)) {
+      sel_dragging = 1; /* selecting text */
+      sel_x = ptr_x;
+      sel_y = ptr_y;
+      update_selection();
+    } else {
+      free_words();
+      dragging = 1;
+      drag_x = ptr_x;
+      drag_y = ptr_y;
+    }
+  } else if (sel_dragging) {
+    sel_dragging = 0;
+    copy_selection();
   } else if (dragging) {
     dragging = 0;
-    struct box b = make_box(drag_x, drag_y, ptr_x, ptr_y);
-    theBox = b;
+    theBox = make_box(drag_x, drag_y, ptr_x, ptr_y);
   }
   request_redraw();
 }
+
 static void ptr_axis(void *d, struct wl_pointer *p, uint32_t time,
                      uint32_t axis, wl_fixed_t value) {}
 static const struct wl_pointer_listener pointer_listener = {
@@ -328,7 +534,14 @@ static void kb_key(void *d, struct wl_keyboard *k, uint32_t serial,
     running = 0;
 
   if (key == KEY_ENTER && state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-    capture_pending = 1;
+    if (mode == MODE_TEXT)
+      reading_pending = 1;
+    else if (mode == MODE_SHOT)
+      capture_pending = 1;
+  }
+  if (key == KEY_TAB && state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+    mode = mode == MODE_SHOT ? MODE_TEXT : MODE_SHOT;
+    request_redraw();
   }
 }
 static void kb_mods(void *d, struct wl_keyboard *k, uint32_t serial,
@@ -442,6 +655,14 @@ int main(void) {
       capture_pending = 0;
       capture_box(theBox);
       running = 0;
+    }
+    if (reading_pending) {
+      reading_pending = 0;
+      hide_overlay();
+      run_grim(theBox, OCR_PATH);
+      run_ocr(OCR_PATH, theBox);
+      mode = MODE_TEXT;
+      show_overlay();
     }
   }
 

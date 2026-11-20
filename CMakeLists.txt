@@ -8,6 +8,7 @@ pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo)
 pkg_get_variable(WL_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 pkg_get_variable(WL_SCANNER wayland-scanner wayland_scanner)
 pkg_check_modules(WAYLAND_CURSOR REQUIRED IMPORTED_TARGET wayland-cursor)
+pkg_check_modules(TESS REQUIRED IMPORTED_TARGET tesseract lept)
 
 # Generate client header + glue code for a protocol XML
 function(wl_protocol xml name)
@@ -33,3 +34,4 @@ target_include_directories(ocra PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(ocra PRIVATE PkgConfig::WAYLAND PkgConfig::PANGOCAIRO)
 target_link_libraries(ocra PRIVATE
     PkgConfig::WAYLAND PkgConfig::WAYLAND_CURSOR PkgConfig::PANGOCAIRO)
+target_link_libraries(ocra PRIVATE PkgConfig::TESS)
