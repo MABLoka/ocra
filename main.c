@@ -212,38 +212,14 @@ static void copy_selection(void) {
 }
 
 static void draw_words(cairo_t *cr) {
+  cairo_set_source_rgba(cr, 0.2, 0.6, 1.0, 0.35);
   for (int i = 0; i < nwords; i++) {
+    if (!words[i].selected)
+      continue;
     struct box r = words[i].r;
-
-    /* backing: blue if selected, dark otherwise */
-    if (words[i].selected)
-      cairo_set_source_rgba(cr, 0.2, 0.6, 1.0, 0.85);
-    else
-      cairo_set_source_rgba(cr, 0, 0, 0, 0.7);
     cairo_rectangle(cr, r.x, r.y, r.w, r.h);
-    cairo_fill(cr);
-
-    /* text sized to the word's box */
-    PangoLayout *layout = pango_cairo_create_layout(cr);
-    PangoFontDescription *font = pango_font_description_from_string("Sans");
-    pango_font_description_set_absolute_size(font, r.h * 0.8 * PANGO_SCALE);
-    pango_layout_set_font_description(layout, font);
-    pango_layout_set_text(layout, words[i].text, -1);
-    int tw, th;
-    pango_layout_get_pixel_size(layout, &tw, &th);
-
-    cairo_save(cr);
-    cairo_translate(cr, r.x, r.y + (r.h - th) / 2.0);
-    if (tw > 0)
-      cairo_scale(cr, r.w / tw, 1.0);      /* stretch to the box width */
-    pango_cairo_update_layout(cr, layout); /* required after transforming */
-    cairo_set_source_rgb(cr, 1, 1, 1);
-    pango_cairo_show_layout(cr, layout);
-    cairo_restore(cr);
-
-    pango_font_description_free(font);
-    g_object_unref(layout);
   }
+  cairo_fill(cr);
 }
 
 /* ---- OCR END ---- */
