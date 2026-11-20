@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(awar C)
+project(ocra C)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(PkgConfig REQUIRED)
@@ -28,8 +28,8 @@ wl_protocol(${WL_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml xdg-shell)
 wl_protocol(${CMAKE_SOURCE_DIR}/protocol/wlr-layer-shell-unstable-v1.xml
             wlr-layer-shell-unstable-v1)
 
-add_executable(awar main.c ${PROTO_SRCS})
-target_include_directories(awar PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(awar PRIVATE PkgConfig::WAYLAND PkgConfig::PANGOCAIRO)
-target_link_libraries(awar PRIVATE
+add_executable(ocra main.c ${PROTO_SRCS})
+target_include_directories(ocra PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(ocra PRIVATE PkgConfig::WAYLAND PkgConfig::PANGOCAIRO)
+target_link_libraries(ocra PRIVATE
     PkgConfig::WAYLAND PkgConfig::WAYLAND_CURSOR PkgConfig::PANGOCAIRO)
