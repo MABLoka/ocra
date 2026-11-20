@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-cursor.h>
@@ -66,10 +67,14 @@ static void capture_box(struct box b) {
   wl_display_roundtrip(display);
 
   /* run grim */
+  time_t now = time(NULL);
+  char name[64];
+  strftime(name, sizeof name, "%Y-%m-%d_%H-%M-%S.png", localtime(&now));
+
   char geom[64];
   snprintf(geom, sizeof geom, "%d,%d %dx%d", (int)b.x, (int)b.y, (int)b.w,
            (int)b.h);
-  char *argv[] = {"grim", "-g", geom, "box.png", NULL};
+  char *argv[] = {"grim", "-g", geom, name, NULL};
   pid_t pid;
   if (posix_spawnp(&pid, "grim", NULL, NULL, argv, environ) == 0)
     waitpid(pid, NULL, 0);
@@ -398,6 +403,7 @@ static void setup_cursor(void) {
 }
 
 int main(void) {
+  display = wl_display_connect(NULL);
   if (!display) {
     fprintf(stderr, "Can't connect to Wayland\n");
     return 1;
