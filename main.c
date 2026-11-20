@@ -69,12 +69,14 @@ static void capture_box(struct box b) {
   /* run grim */
   time_t now = time(NULL);
   char name[64];
-  strftime(name, sizeof name, "%Y-%m-%d_%H-%M-%S.png", localtime(&now));
+  strftime(name, sizeof name, "%Y-%m-%d_%H%M%S-ocra.png", localtime(&now));
+  char path[512];
+  snprintf(path, sizeof path, "%s/Pictures/%s", getenv("HOME"), name);
 
   char geom[64];
   snprintf(geom, sizeof geom, "%d,%d %dx%d", (int)b.x, (int)b.y, (int)b.w,
            (int)b.h);
-  char *argv[] = {"grim", "-g", geom, name, NULL};
+  char *argv[] = {"grim", "-g", geom, path, NULL};
   pid_t pid;
   if (posix_spawnp(&pid, "grim", NULL, NULL, argv, environ) == 0)
     waitpid(pid, NULL, 0);
